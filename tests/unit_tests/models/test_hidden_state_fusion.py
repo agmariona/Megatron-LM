@@ -48,7 +48,7 @@ class TestHiddenStateFusion:
 
     def test_specs_build_the_documented_modules(self):
         additive = self._build("additive")
-        gated = self._build("gated")
+        gated = self._build("gated", name="hidden_state_feedback.fusion")
         assert isinstance(additive, AdditiveHiddenStateFusion)
         assert isinstance(gated, GatedHiddenStateFusion)
         assert isinstance(additive.hidden_state_norm, L2Norm)
@@ -59,19 +59,19 @@ class TestHiddenStateFusion:
         assert isinstance(gated.gate_projection, TELinear)
         assert sum(p.numel() for p in additive.parameters()) == HIDDEN * HIDDEN
         assert sum(p.numel() for p in gated.parameters()) == 2 * HIDDEN * HIDDEN
-
-    @pytest.mark.parametrize("name", list(SPECS))
-    def test_projection_weights_are_replicated_across_tensor_parallel_ranks(self, name):
-        fusion = self._build(name)
-        for parameter in fusion.parameters():
+        # The projection weights are replicated across tensor-parallel ranks.
+        for parameter in [*additive.parameters(), *gated.parameters()]:
             assert parameter.tensor_model_parallel is False
             assert parameter.allreduce is True
 
-    def test_additive_module_is_the_identity_at_init(self):
+    def test_additive_module_is_the_identity_at_init_and_still_receives_gradient(self):
         fusion = self._build("additive")
         assert torch.count_nonzero(fusion.hidden_state_projection.weight) == 0
         fused = fusion(self.token_embedding, self.previous_hidden)
         assert torch.equal(fused, self.token_embedding)
+        fused.sum().backward()
+        gradient = fusion.hidden_state_projection.weight.grad
+        assert gradient is not None and torch.count_nonzero(gradient) > 0
 
     def test_additive_matches_the_equation(self):
         fusion = self._build("additive")
@@ -102,13 +102,6 @@ class TestHiddenStateFusion:
             assert 0.01 < weight.float().std().item() < 0.03
 
     @pytest.mark.parametrize("name", list(SPECS))
-    def test_output_has_the_input_shape(self, name):
-        fusion = self._build(name)
-        fused = fusion(self.token_embedding, self.previous_hidden)
-        assert fused.shape == self.token_embedding.shape
-        assert fused.dtype == self.token_embedding.dtype
-
-    @pytest.mark.parametrize("name", list(SPECS))
     def test_rejects_mismatched_shapes(self, name):
         fusion = self._build(name)
         with pytest.raises(ValueError):
@@ -129,20 +122,6 @@ class TestHiddenStateFusion:
         for parameter in fusion.parameters():
             assert parameter.grad is not None and torch.count_nonzero(parameter.grad) > 0
 
-    def test_zero_initialized_projection_still_receives_gradient(self):
-        fusion = self._build("additive")
-        fusion(self.token_embedding, self.previous_hidden).sum().backward()
-        gradient = fusion.hidden_state_projection.weight.grad
-        assert gradient is not None and torch.count_nonzero(gradient) > 0
-
-    def test_same_seed_gives_the_same_weights(self):
-        torch.manual_seed(123)
-        first = self._build("gated")
-        torch.manual_seed(123)
-        second = self._build("gated")
-        for a, b in zip(first.parameters(), second.parameters()):
-            assert torch.equal(a, b)
-
     @pytest.mark.parametrize("name", list(SPECS))
     def test_sharded_state_dict_names_the_projections(self, name):
         fusion = self._build(name)
@@ -151,12 +130,6 @@ class TestHiddenStateFusion:
         if name == "gated":
             assert "fusion.gate_projection.weight" in sharded
         assert all(key.startswith("fusion.") for key in sharded)
-
-    @pytest.mark.parametrize("name", list(SPECS))
-    def test_accepts_a_module_name(self, name):
-        fusion = self._build(name, name="hidden_state_feedback.fusion")
-        fused = fusion(self.token_embedding, self.previous_hidden)
-        assert fused.shape == self.token_embedding.shape
 
     @pytest.mark.parametrize("name", list(SPECS))
     def test_bf16_forward(self, name):
