@@ -165,6 +165,8 @@ class HybridModel(LanguageModule, GraphableMegatronModule):
         hybrid_layer_config_list (Sequence[HybridLayerEntry], optional): First-class
             decoder, pipeline-split, and MTP configuration sequence. Mutually exclusive with
             ``hybrid_layer_pattern`` and its deprecated alternatives. Defaults to None.
+        hidden_state_fusion_spec (ModuleSpec, optional): Override for the built-in fusion spec.
+            When omitted, use the spec that ``config.hidden_state_feedback.fusion`` names.
     """
 
     def __init__(
@@ -192,9 +194,12 @@ class HybridModel(LanguageModule, GraphableMegatronModule):
         pg_collection: Optional[ProcessGroupCollection] = None,
         vp_stage: Optional[int] = None,
         hybrid_layer_config_list: Optional[Sequence[HybridLayerEntry]] = None,
+        hidden_state_fusion_spec: ModuleSpec | None = None,
     ) -> None:
         if vocab_size is None or max_sequence_length is None:
             raise ValueError("vocab_size and max_sequence_length must be provided.")
+        if hidden_state_fusion_spec is not None and config.hidden_state_feedback is None:
+            raise ValueError("hidden_state_fusion_spec requires config.hidden_state_feedback.")
         if hybrid_stack_spec is None:
             # Resolve the existing built-in construction only at the model boundary. External
             # configs supply module classes directly, independently of this compatibility API.
@@ -503,6 +508,23 @@ class HybridModel(LanguageModule, GraphableMegatronModule):
                 scatter_to_sequence_parallel=scatter_embedding_sequence_parallel,
                 tp_group=self.pg_collection.tp,
                 pg_collection=self.pg_collection,
+            )
+
+        self.hidden_state_fusion = None
+        # Only the stage with the embedding owns the fusion. The config rejects pipeline
+        # parallelism with feedback for now, so only a direct caller would build another stage.
+        if self.config.hidden_state_feedback is not None and self.pre_process:
+            if hidden_state_fusion_spec is None:
+                # Resolve the built-in fusion only at the model boundary, as for the stack spec.
+                from megatron.core.models.hybrid.hidden_state_feedback.resolve import (
+                    resolve_hidden_state_fusion_spec,
+                )
+
+                hidden_state_fusion_spec = resolve_hidden_state_fusion_spec(
+                    self.config.hidden_state_feedback
+                )
+            self.hidden_state_fusion = build_module(
+                hidden_state_fusion_spec, config=self.config, pg_collection=self.pg_collection
             )
 
         # MLA (also used by DeepSeek Sparse Attention) uses its own decoupled RoPE, therefore we do
