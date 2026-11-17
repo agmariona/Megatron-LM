@@ -2331,6 +2331,8 @@ def _add_network_size_args(parser):
         "expert_gtp_weight_remat_size",
         # Constructed from the dedicated flat CLI arguments below.
         "wide_residual",
+        # Nested config without CLI arguments yet.
+        "hidden_state_feedback",
         # Parsed manually as a JSON object below.
         "moe_megakernel_backend_config",
     ]

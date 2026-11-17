@@ -31,6 +31,7 @@ from megatron.core.transformer.enums import (
     InferenceCudaGraphScope,
     LayerType,
 )
+from megatron.core.transformer.hidden_state_feedback_config import HiddenStateFeedbackConfig
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
 from megatron.core.transformer.wide_residual_config import WideResidualConfig
 
@@ -1507,6 +1508,16 @@ class TransformerConfig(ModelParallelConfig):
     """
 
     ####################
+    # Hidden State Feedback Configuration
+    ####################
+    hidden_state_feedback: Optional[HiddenStateFeedbackConfig] = None
+    """Optional configuration for feedback of the previous position's final hidden state.
+
+    When set, the model builds a fusion module that combines each token embedding with
+    the final hidden state of the previous position.
+    """
+
+    ####################
     # miscellaneous
     ####################
     clone_scatter_output_in_embedding: bool = True
@@ -1975,6 +1986,28 @@ class TransformerConfig(ModelParallelConfig):
                     "The fine-grained EP-overlap schedule invokes the pre-MLP norm and MLP BDA "
                     "outside TransformerLayer._forward_mlp, bypassing the wide-residual MLP "
                     "read and write connection."
+                )
+
+        if self.hidden_state_feedback is not None:
+            if self.context_parallel_size > 1:
+                raise NotImplementedError(
+                    "hidden_state_feedback does not yet support context_parallel_size > 1. "
+                    "The first position of a rank needs the last hidden state of the previous rank."
+                )
+            if self.pipeline_model_parallel_size > 1:
+                raise NotImplementedError(
+                    "hidden_state_feedback does not yet support pipeline_model_parallel_size > 1. "
+                    "The final hidden states and the fusion module are on different stages."
+                )
+            if self.sequence_parallel and self.tensor_model_parallel_size > 1:
+                raise NotImplementedError(
+                    "hidden_state_feedback does not yet support sequence_parallel with "
+                    "tensor_model_parallel_size > 1. The sequence is split across the TP ranks."
+                )
+            if self.sequence_packing_scheduler is not None:
+                raise NotImplementedError(
+                    "hidden_state_feedback does not yet support sequence_packing_scheduler or "
+                    "dynamic_context_parallel. Scheduled packed microbatches are not validated."
                 )
 
         # Resolve deprecated attention variant spellings up front so that every consumer
